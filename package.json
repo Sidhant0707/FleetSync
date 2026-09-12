@@ -1,0 +1,25 @@
+{
+  "name": "fleetsync",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real-Time Dynamic Vehicle Routing and Dispatch Simulation",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/server",
+    "build": "npm run build --workspace=apps/server",
+    "test": "npm test --workspace=apps/server",
+    "typecheck": "npm run typecheck --workspace=apps/server"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}
