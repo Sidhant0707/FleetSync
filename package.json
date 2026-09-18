@@ -9,9 +9,9 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace=apps/server",
-    "build": "npm run build --workspace=apps/server",
-    "test": "npm test --workspace=apps/server",
-    "typecheck": "npm run typecheck --workspace=apps/server"
+    "build": "npm run build --workspace=apps/server && npm run build --workspace=apps/web",
+    "test": "npm test --workspace=apps/server && npm test --workspace=apps/web",
+    "typecheck": "npm run typecheck --workspace=apps/server && npm run typecheck --workspace=apps/web"
   },
   "engines": {
     "node": ">=24"

@@ -20,26 +20,41 @@ function withCanonicalDrive(filePath) {
   );
 }
 
-const packageDir = withCanonicalDrive(
-  path.dirname(fileURLToPath(import.meta.url)),
-);
+const packageDir =
+  withCanonicalDrive(
+    path.dirname(
+      fileURLToPath(import.meta.url),
+    ),
+  );
 
 process.chdir(packageDir);
 
 const require = createRequire(
-  path.join(packageDir, "package.json"),
-);
-
-const vitestCli = withCanonicalDrive(
   path.join(
-    path.dirname(require.resolve("vitest/package.json")),
-    "vitest.mjs",
+    packageDir,
+    "package.json",
   ),
 );
 
+const vitestCli =
+  withCanonicalDrive(
+    path.join(
+      path.dirname(
+        require.resolve(
+          "vitest/package.json",
+        ),
+      ),
+      "vitest.mjs",
+    ),
+  );
+
 const child = spawn(
   process.execPath,
-  [vitestCli, "run", ...process.argv.slice(2)],
+  [
+    vitestCli,
+    "run",
+    ...process.argv.slice(2),
+  ],
   {
     stdio: "inherit",
     cwd: packageDir,
@@ -55,7 +70,10 @@ child.on("error", (error) => {
 
 child.on("exit", (code, signal) => {
   if (signal) {
-    process.kill(process.pid, signal);
+    process.kill(
+      process.pid,
+      signal,
+    );
     return;
   }
 
