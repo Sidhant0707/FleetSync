@@ -73,6 +73,24 @@ export interface SimulationState {
   readonly completedAtSimTime: number | null;
 }
 
+/**
+ * One consistent view of everything a progress-dependent consumer needs: the
+ * committed expanded routes together with the vehicle states and the
+ * simulation time they were read at.
+ *
+ * `routes[i]` and `vehicleStates[i]` describe the same vehicle (both sorted by
+ * vehicleId ascending). `routes` holds the engine's own deeply frozen
+ * `ExpandedRoute` objects, never copies or re-expansions. The shape of
+ * `{ routes, vehicleStates }` is exactly what `identifyAffectedEntities`
+ * expects as its route-progress input.
+ */
+export interface RouteProgressSnapshot {
+  readonly status: SimulationStatus;
+  readonly simTime: number;
+  readonly routes: readonly ExpandedRoute[];
+  readonly vehicleStates: readonly VehicleSimulationState[];
+}
+
 export interface SimulationEngineOptions {
   readonly graph: RoadGraph;
   readonly depot: Depot;
@@ -109,10 +127,11 @@ interface VehicleRuntime {
 /**
  * Deterministic discrete-event execution of a static FleetSync plan.
  *
- * Time only ever moves through explicit `advanceBy` deltas: the engine never
- * reads a wall clock, sleeps, or schedules timers. A real-time playback driver
- * is expected to live outside the domain and simply call `advanceBy` with
- * `clock.toSimDuration(realElapsed)`.
+ * Time only ever moves through explicit `advanceBy` deltas or `advanceTo`
+ * absolute targets: the engine never reads a wall clock, sleeps, or schedules
+ * timers. A real-time playback driver is expected to live outside the domain
+ * and simply call `advanceBy` with `clock.toSimDuration(realElapsed)`. Callers
+ * that need to land on a specific instant (operational events) use `advanceTo`.
  *
  * Nothing supplied by the caller is mutated. In particular `Order.status` is
  * left untouched: delivery is recorded in this engine's own state, so vehicle
@@ -344,6 +363,80 @@ export class SimulationEngine {
     return this.#log.since(from);
   }
 
+  /**
+   * Advances simulation time to the absolute instant `targetTime` and returns
+   * the events emitted during this call.
+   *
+   * Transitions are processed exactly as in `advanceBy`: the loop stops at the
+   * instant of each transition on the way and settles it. The difference is
+   * the final step. Once the target is reached the clock is ASSIGNED
+   * `targetTime` rather than incremented by a computed delta, so a reachable
+   * target is hit exactly. No tolerance is used anywhere.
+   *
+   * The clock only moves forward and never past the target. It stops short of
+   * the target when the simulation completes (`simTime` stays at the
+   * makespan) or stalls (the next transition never arrives, for example a
+   * vehicle that entered an edge with an infinite duration); callers detect
+   * both by comparing `simTime` with the target. A target equal to the current
+   * time emits nothing. A target before the current time is invalid, even
+   * after completion, because the request is absolute.
+   */
+  advanceTo(targetTime: number): readonly SimulationEvent[] {
+    if (this.#status === "not_started") {
+      throw new Error("Cannot advance a simulation that has not been started");
+    }
+
+    if (!Number.isFinite(targetTime) || targetTime < this.#clock.simTime) {
+      throw new Error(
+        `Invalid simulation target time: ${String(targetTime)}; expected a finite number not before the current simulation time ${String(this.#clock.simTime)}`,
+      );
+    }
+
+    const from = this.#log.size;
+
+    if (this.#isCompleted()) {
+      return this.#log.since(from);
+    }
+
+    let steps = 0;
+
+    while (this.#clock.simTime < targetTime) {
+      if (++steps > this.#maxSteps) {
+        throw new Error(
+          "Simulation exceeded its maximum transition budget while advancing",
+        );
+      }
+
+      const nextTransition = this.#timeToNextTransition();
+      if (!Number.isFinite(nextTransition)) {
+        break;
+      }
+
+      const remaining = targetTime - this.#clock.simTime;
+      const step = Math.min(nextTransition, remaining);
+      // Treat a step that would reach or pass the target through rounding as
+      // the final one, so the clock can never overshoot it.
+      const reachesTarget =
+        remaining <= nextTransition ||
+        this.#clock.simTime + nextTransition >= targetTime;
+
+      this.#applyProgress(step);
+      if (reachesTarget) {
+        this.#clock.advanceTo(targetTime);
+      } else {
+        this.#clock.advance(step);
+      }
+
+      this.#settle();
+
+      if (this.#isCompleted()) {
+        break;
+      }
+    }
+
+    return this.#log.since(from);
+  }
+
   getState(): SimulationState {
     return Object.freeze({
       status: this.#status,
@@ -356,6 +449,34 @@ export class SimulationEngine {
         this.#deliveries.map((delivery) => Object.freeze({ ...delivery })),
       ),
       completedAtSimTime: this.#completedAtSimTime,
+    });
+  }
+
+  /**
+   * Read-only snapshot of the actual committed expanded routes and the vehicle
+   * states at the current simulation instant, taken in one call so they cannot
+   * disagree with each other or with `simTime`.
+   *
+   * The engine settles every due transition before returning from `start()`
+   * and from each step of `advanceBy()`, so a snapshot is always taken at a
+   * settled instant: a vehicle that reached a node exactly now has already
+   * entered its next edge.
+   *
+   * Immutability: the returned arrays and the per-vehicle states are fresh and
+   * frozen on every call. The route objects are the very ones the engine
+   * executes. `expandRoute` froze them (route, legs array, every leg and every
+   * edge-ID array), the engine never replaces them, so handing them out cannot
+   * let a caller alter the engine. Later graph changes do not alter them, which
+   * is the point: they are the committed traversal, not a fresh path search.
+   */
+  getRouteProgressSnapshot(): RouteProgressSnapshot {
+    return Object.freeze({
+      status: this.#status,
+      simTime: this.#clock.simTime,
+      routes: Object.freeze(this.#runtimes.map((runtime) => runtime.expanded)),
+      vehicleStates: Object.freeze(
+        this.#runtimes.map((runtime) => this.#snapshotVehicle(runtime)),
+      ),
     });
   }
 

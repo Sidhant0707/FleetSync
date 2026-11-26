@@ -7,7 +7,8 @@
  * `multiplier` exists only so that a future real-time playback driver (which
  * lives OUTSIDE the domain) can convert between real milliseconds and
  * simulation-time units. No state transition in the simulator may depend on
- * it: the engine advances time exclusively through explicit deltas.
+ * it: the engine advances time exclusively through explicit deltas or
+ * explicit absolute targets.
  */
 export interface SimulationClockOptions {
   /** Simulation time the clock starts at. Defaults to 0. */
@@ -64,6 +65,25 @@ export class SimulationClock {
     }
 
     this.#simTime += delta;
+  }
+
+  /**
+   * Moves simulation time forward to the absolute instant `targetTime` and
+   * assigns it exactly.
+   *
+   * `advance` accumulates deltas, so `simTime + (target - simTime)` can miss
+   * `target` by a rounding error (0.2 + (0.9 - 0.2) is 0.8999999999999999).
+   * Assigning the target removes that error. The target must be finite and
+   * not earlier than the current time; equal is allowed and changes nothing.
+   */
+  advanceTo(targetTime: number): void {
+    if (!Number.isFinite(targetTime) || targetTime < this.#simTime) {
+      throw new Error(
+        `Invalid simulation target time: ${String(targetTime)}; expected a finite number not before ${String(this.#simTime)}`,
+      );
+    }
+
+    this.#simTime = targetTime;
   }
 
   /** Converts elapsed real milliseconds into simulation-time units. */
