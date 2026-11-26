@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RoadGraph } from "./RoadGraph.js";
+import { expandRoute } from "./routeExpansion.js";
 import { SimulationEngine } from "./simulation.js";
 import type { SimulationEngineOptions } from "./simulation.js";
 import type { SimulationEvent } from "./simulationEvents.js";
@@ -645,5 +646,328 @@ describe("SimulationEngine", () => {
         10, 10,
       ]);
     });
+  });
+});
+
+describe("SimulationEngine.getRouteProgressSnapshot", () => {
+  it("returns the engine's own committed routes with ids, versions and leg order", () => {
+    const engine = new SimulationEngine(twoStopSetup());
+    engine.start();
+
+    const snapshot = engine.getRouteProgressSnapshot();
+
+    expect(snapshot.routes).toHaveLength(1);
+    const route = snapshot.routes[0];
+    expect(route).toMatchObject({
+      routeId: "route-v1",
+      vehicleId: "v1",
+      version: 1,
+      depotNodeId: "D",
+      totalTravelTime: 12,
+    });
+    expect(
+      route?.legs.map((leg) => [
+        leg.legIndex,
+        leg.kind,
+        leg.fromNodeId,
+        leg.toNodeId,
+        [...leg.edgeIds],
+        leg.arrivalOrderId,
+        leg.arrivalSequenceNo,
+      ]),
+    ).toEqual([
+      [0, "depot_to_stop", "D", "A", ["D-A"], "A", 1],
+      [1, "stop_to_stop", "A", "B", ["A-B"], "B", 2],
+      [2, "stop_to_depot", "B", "D", ["B-D"], null, null],
+    ]);
+
+    // The very same objects on every call: exposed, not reconstructed.
+    expect(engine.getRouteProgressSnapshot().routes[0]).toBe(route);
+  });
+
+  it("keeps the committed legs after the graph changes, unlike a fresh expansion", () => {
+    const options = twoStopSetup();
+    const engine = new SimulationEngine(options);
+    engine.start();
+
+    const committed = engine.getRouteProgressSnapshot().routes[0];
+
+    // Closing A-B would send a re-expanded leg A -> B through the depot.
+    options.graph.closeEdge("A-B");
+
+    const reExpanded = expandRoute(
+      createRoute("v1", "A", "B"),
+      new Map(options.orders.map((order) => [order.id, order])),
+      "D",
+      options.graph,
+    );
+
+    expect(reExpanded.ok).toBe(true);
+    if (reExpanded.ok) {
+      expect(reExpanded.expanded.legs[1]?.edgeIds).toEqual(["A-D", "D-B"]);
+    }
+
+    expect(committed?.legs[1]?.edgeIds).toEqual(["A-B"]);
+    expect(engine.getRouteProgressSnapshot().routes[0]).toBe(committed);
+  });
+
+  it("cannot be used to change the engine", () => {
+    const engine = new SimulationEngine(twoStopSetup());
+    engine.start();
+
+    const snapshot = engine.getRouteProgressSnapshot();
+    const route = snapshot.routes[0];
+    const leg = route?.legs[1];
+    const state = snapshot.vehicleStates[0];
+
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.routes)).toBe(true);
+    expect(Object.isFrozen(snapshot.vehicleStates)).toBe(true);
+    expect(Object.isFrozen(route)).toBe(true);
+    expect(Object.isFrozen(route?.legs)).toBe(true);
+    expect(Object.isFrozen(leg)).toBe(true);
+    expect(Object.isFrozen(leg?.edgeIds)).toBe(true);
+    expect(Object.isFrozen(state)).toBe(true);
+    expect(Object.isFrozen(state?.completedEdgeIds)).toBe(true);
+
+    // Every write is refused; none reaches the engine.
+    expect(Reflect.set(snapshot.routes, 0, undefined)).toBe(false);
+    expect(Reflect.set(route ?? {}, "version", 99)).toBe(false);
+    expect(Reflect.set(route?.legs ?? [], 1, undefined)).toBe(false);
+    expect(Reflect.set(leg?.edgeIds ?? [], 0, "X")).toBe(false);
+    expect(Reflect.set(state ?? {}, "phase", "completed")).toBe(false);
+
+    expect(engine.getRouteProgressSnapshot().routes[0]?.legs[1]?.edgeIds).toEqual([
+      "A-B",
+    ]);
+
+    engine.advanceBy(100);
+    expect(engine.getState().status).toBe("completed");
+    expect(engine.getState().simTime).toBe(12);
+  });
+
+  it("returns fresh arrays on each call that share the same route objects", () => {
+    const engine = new SimulationEngine(twoStopSetup());
+    engine.start();
+
+    const first = engine.getRouteProgressSnapshot();
+    const second = engine.getRouteProgressSnapshot();
+
+    expect(second).not.toBe(first);
+    expect(second.routes).not.toBe(first.routes);
+    expect(second.vehicleStates).not.toBe(first.vehicleStates);
+    expect(second.routes[0]).toBe(first.routes[0]);
+  });
+
+  it("describes one consistent instant: routes, vehicle states and time agree", () => {
+    const engine = new SimulationEngine(
+      twoStopSetup({
+        routes: [createRoute("v2", "B"), createRoute("v1", "A")],
+        vehicles: [createVehicle("v2"), createVehicle("v1")],
+      }),
+    );
+    engine.start();
+    engine.advanceBy(3);
+
+    const snapshot = engine.getRouteProgressSnapshot();
+    const state = engine.getState();
+
+    expect(snapshot.status).toBe(state.status);
+    expect(snapshot.simTime).toBe(3);
+    expect(snapshot.simTime).toBe(state.simTime);
+    expect(snapshot.vehicleStates).toEqual(state.vehicles);
+
+    // Both arrays are sorted by vehicleId and line up index for index.
+    expect(snapshot.routes.map((route) => route.vehicleId)).toEqual(["v1", "v2"]);
+    expect(snapshot.vehicleStates.map((vehicle) => vehicle.vehicleId)).toEqual([
+      "v1",
+      "v2",
+    ]);
+    snapshot.routes.forEach((route, index) => {
+      expect(snapshot.vehicleStates[index]).toMatchObject({
+        vehicleId: route.vehicleId,
+        routeId: route.routeId,
+        routeVersion: route.version,
+      });
+    });
+  });
+
+  it("is available before start, with every vehicle idle at the depot", () => {
+    const engine = new SimulationEngine(twoStopSetup());
+
+    const snapshot = engine.getRouteProgressSnapshot();
+
+    expect(snapshot.status).toBe("not_started");
+    expect(snapshot.simTime).toBe(0);
+    expect(snapshot.routes).toHaveLength(1);
+    expect(snapshot.vehicleStates[0]).toMatchObject({
+      phase: "idle_at_depot",
+      currentNodeId: "D",
+    });
+  });
+
+  it("is taken at a settled instant: a vehicle arriving exactly now has entered its next edge", () => {
+    const engine = new SimulationEngine(twoStopSetup());
+    engine.start();
+    engine.advanceBy(5);
+
+    const snapshot = engine.getRouteProgressSnapshot();
+
+    expect(snapshot.simTime).toBe(5);
+    expect(snapshot.vehicleStates[0]).toMatchObject({
+      phase: "traveling",
+      currentEdgeId: "A-B",
+      edgeElapsed: 0,
+      legIndex: 1,
+      edgeIndexInLeg: 0,
+      completedEdgeIds: ["D-A"],
+      completedLegIndexes: [0],
+      servedOrderIds: ["A"],
+    });
+  });
+});
+
+
+describe("SimulationEngine.advanceTo", () => {
+  function startedEngine(
+    overrides: Partial<SimulationEngineOptions> = {},
+  ): SimulationEngine {
+    const engine = new SimulationEngine(twoStopSetup(overrides));
+    engine.start();
+    return engine;
+  }
+
+  it("lands exactly on 0.9 from 0.2, where adding a computed delta does not", () => {
+    // The floating-point fact this method exists to avoid.
+    expect(0.2 + (0.9 - 0.2)).not.toBe(0.9);
+
+    const engine = startedEngine();
+    engine.advanceBy(0.2);
+    expect(engine.getState().simTime).toBe(0.2);
+
+    engine.advanceTo(0.9);
+
+    const state = engine.getState();
+    expect(state.simTime).toBe(0.9);
+    expect(state.status).toBe("running");
+    expect(state.vehicles[0]).toMatchObject({
+      phase: "traveling",
+      currentEdgeId: "D-A",
+    });
+    expect(state.vehicles[0]?.edgeElapsed).toBeCloseTo(0.9, 12);
+  });
+
+  it("lands exactly on every reachable pair of tenths up to 2.0", () => {
+    for (let from = 1; from <= 20; from += 1) {
+      for (let to = from + 1; to <= 20; to += 1) {
+        const engine = startedEngine();
+        engine.advanceTo(from / 10);
+        engine.advanceTo(to / 10);
+
+        expect(engine.getState().simTime, `${from / 10} -> ${to / 10}`).toBe(
+          to / 10,
+        );
+      }
+    }
+  });
+
+  it("stops at each transition on the way and lands exactly on the target", () => {
+    const engine = startedEngine();
+
+    const events = engine.advanceTo(7.1);
+
+    expect(engine.getState().simTime).toBe(7.1);
+    expect(engine.getState().vehicles[0]?.completedEdgeIds).toEqual([
+      "D-A",
+      "A-B",
+    ]);
+    // Transitions keep their own exact instants (5 and 7), not the target's.
+    expect(
+      events
+        .filter((event) => event.type === "vehicle.edge_completed")
+        .map((event) => event.simTime),
+    ).toEqual([5, 7]);
+  });
+
+  it("matches advanceBy on integer times: same events, same state", () => {
+    const byTarget = startedEngine();
+    const byDelta = startedEngine();
+
+    const targetEvents = byTarget.advanceTo(5);
+    const deltaEvents = byDelta.advanceBy(5);
+
+    expect(targetEvents).toEqual(deltaEvents);
+    expect(byTarget.getState()).toEqual(byDelta.getState());
+    // Same-instant transitions are settled before returning.
+    expect(byTarget.getState().vehicles[0]).toMatchObject({
+      currentEdgeId: "A-B",
+      edgeElapsed: 0,
+      servedOrderIds: ["A"],
+    });
+  });
+
+  it("is a no-op when the target equals the current time", () => {
+    const engine = startedEngine();
+    engine.advanceTo(3);
+    const before = engine.getState();
+
+    expect(engine.advanceTo(3)).toEqual([]);
+    expect(engine.getState()).toEqual(before);
+  });
+
+  it("rejects an unstarted engine, a past target, and a non-finite target", () => {
+    const unstarted = new SimulationEngine(twoStopSetup());
+    expect(() => unstarted.advanceTo(1)).toThrow(/has not been started/);
+
+    const engine = startedEngine();
+    engine.advanceTo(3);
+    expect(() => engine.advanceTo(2.9)).toThrow(/Invalid simulation target time/);
+    for (const target of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+    ]) {
+      expect(() => engine.advanceTo(target)).toThrow(
+        /Invalid simulation target time/,
+      );
+    }
+    expect(engine.getState().simTime).toBe(3);
+  });
+
+  it("stops at the makespan when the plan completes before the target", () => {
+    const engine = startedEngine();
+
+    const events = engine.advanceTo(100);
+
+    expect(engine.getState()).toMatchObject({ status: "completed", simTime: 12 });
+    expect(events.at(-1)?.type).toBe("simulation.completed");
+
+    // Completed: a later target changes nothing and emits nothing.
+    expect(engine.advanceTo(200)).toEqual([]);
+    expect(engine.getState().simTime).toBe(12);
+    // A target in the past is still invalid.
+    expect(() => engine.advanceTo(5)).toThrow(/Invalid simulation target time/);
+  });
+
+  it("stops where the engine stalls on a closed edge instead of reaching the target", () => {
+    const options = twoStopSetup();
+    // Close after construction: routes are expanded at construction, so the
+    // committed route still uses A-B, as it does for an operational closure.
+    const engine = new SimulationEngine(options);
+    engine.start();
+    options.graph.closeEdge("A-B");
+
+    const events = engine.advanceTo(10);
+
+    expect(events.at(-1)?.type).toBe("vehicle.edge_entered");
+    expect(engine.getState().status).toBe("running");
+    expect(engine.getState().simTime).toBe(5);
+    expect(engine.getState().vehicles[0]).toMatchObject({
+      currentEdgeId: "A-B",
+      edgeDuration: Number.POSITIVE_INFINITY,
+    });
+    // Repeating the request is stable and does not throw.
+    expect(engine.advanceTo(10)).toEqual([]);
+    expect(engine.getState().simTime).toBe(5);
   });
 });

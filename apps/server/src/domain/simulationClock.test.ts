@@ -78,6 +78,41 @@ describe("SimulationClock", () => {
     });
   });
 
+  describe("advanceTo", () => {
+    it("assigns the target exactly", () => {
+      const clock = new SimulationClock();
+      clock.advance(0.2);
+
+      clock.advanceTo(0.9);
+
+      expect(clock.simTime).toBe(0.9);
+    });
+
+    it("accepts the current time and leaves it unchanged", () => {
+      const clock = new SimulationClock({ startTime: 4 });
+
+      clock.advanceTo(4);
+
+      expect(clock.simTime).toBe(4);
+    });
+
+    it("rejects a past or non-finite target and keeps the time", () => {
+      const clock = new SimulationClock({ startTime: 4 });
+
+      for (const target of [
+        3.9,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+      ]) {
+        expect(() => clock.advanceTo(target)).toThrow(
+          /Invalid simulation target time/,
+        );
+      }
+      expect(clock.simTime).toBe(4);
+    });
+  });
+
   describe("multiplier and conversion", () => {
     it("updates the multiplier without touching simulation time", () => {
       const clock = new SimulationClock();
